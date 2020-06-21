@@ -6,11 +6,14 @@ import queue
 import socket
 import subprocess
 import threading
+import base64
+from uuid import uuid4
 import typing
 import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rhasspyserver_hermes.utils import buffer_to_wav
 from rhasspyhermes.audioserver import AudioFrame
 from rhasspyhermes.base import Message
 from rhasspyhermes.client import GeneratorType, HermesClient, TopicArgs
@@ -23,6 +26,7 @@ from rhasspyhermes.wake import (
     HotwordToggleOff,
     HotwordToggleOn,
     HotwordToggleReason,
+    HotwordAudioCaptured,
 )
 
 from .precise import TriggerDetector
@@ -78,6 +82,7 @@ class WakeHermesMqtt(HermesClient):
         udp_forward_mqtt: typing.Optional[typing.Iterable[str]] = None,
         log_predictions: bool = False,
         lang: typing.Optional[str] = None,
+        publish_wakeword_audio: bool = True,
     ):
         super().__init__(
             "rhasspywake_precise_hermes",
@@ -105,12 +110,14 @@ class WakeHermesMqtt(HermesClient):
 
         self.chunk_size = chunk_size
         self.site_info: typing.Dict[str, SiteInfo] = {}
+        self.wake_word_buffer = bytes(self.sample_rate * self.sample_width * self.channels)
 
         self.lang = lang
 
         self.last_audio_site_id: str = "default"
         self.model_id = self.model_path.name
         self.log_predictions = log_predictions
+        self.publish_wakeword_audio = publish_wakeword_audio
 
         # Create site information for known sites
         for site_id in self.site_ids:
@@ -237,17 +244,30 @@ class WakeHermesMqtt(HermesClient):
                 # Use file name
                 wakeword_id = self.model_path.stem
 
+            site_id = site_info.site_id
+            if self.publish_wakeword_audio:
+                session_id = f"{site_id}-{wakeword_id}-{uuid4()}"
+            else:
+                session_id = None
+
             yield (
                 HotwordDetected(
-                    site_id=site_info.site_id,
+                    site_id=site_id,
                     model_id=self.model_id,
                     current_sensitivity=self.sensitivity,
                     model_version="",
                     model_type="personal",
                     lang=self.lang,
+                    session_id=session_id,
                 ),
                 {"wakeword_id": wakeword_id},
             )
+            yield HotwordAudioCaptured(
+                    site_id=site_id,
+                    wakeword_id=wakeword_id,
+                    session_id=session_id,
+                    wav_bytes=base64.b64encode(buffer_to_wav(self.wake_word_buffer)).decode("utf-8"),
+                )
         except Exception as e:
             _LOGGER.exception("handle_detection")
             yield HotwordError(
@@ -343,6 +363,8 @@ class WakeHermesMqtt(HermesClient):
                         # NOTE: The flush() is critical to this working.
                         site_info.engine_proc.stdin.write(chunk)
                         site_info.engine_proc.stdin.flush()
+                        # floating wake-word buffer of 1 second
+                        self.wake_word_buffer = self.wake_word_buffer[self.chunk_size:] + chunk
 
                         # Get prediction
                         line = site_info.engine_proc.stdout.readline()
