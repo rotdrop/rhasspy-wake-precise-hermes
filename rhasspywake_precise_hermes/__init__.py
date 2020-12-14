@@ -110,7 +110,7 @@ class WakeHermesMqtt(HermesClient):
 
         self.chunk_size = chunk_size
         self.site_info: typing.Dict[str, SiteInfo] = {}
-        self.wake_word_buffer = bytes(self.sample_rate * self.sample_width * self.channels)
+        self.wake_word_buffer = bytes(2 * self.sample_rate * self.sample_width * self.channels)
 
         self.lang = lang
 
@@ -233,7 +233,7 @@ class WakeHermesMqtt(HermesClient):
         site_info.wav_queue.put((wav_bytes, False))
 
     async def handle_detection(
-        self, site_info: SiteInfo
+        self, site_info: SiteInfo, hotword_audio
     ) -> typing.AsyncIterable[
         typing.Union[typing.Tuple[HotwordDetected, TopicArgs], HotwordError]
     ]:
@@ -266,7 +266,7 @@ class WakeHermesMqtt(HermesClient):
                     site_id=site_id,
                     wakeword_id=wakeword_id,
                     session_id=session_id,
-                    wav_bytes=base64.b64encode(buffer_to_wav(self.wake_word_buffer)).decode("utf-8"),
+                    wav_bytes=base64.b64encode(hotword_audio).decode("utf-8"),
                 )
         except Exception as e:
             _LOGGER.exception("handle_detection")
@@ -378,9 +378,10 @@ class WakeHermesMqtt(HermesClient):
                                 assert self.loop is not None
 
                                 if site_info.detector.update(float(line)):
+                                    hotword_audio = buffer_to_wav(self.wake_word_buffer)
                                     asyncio.run_coroutine_threadsafe(
                                         self.publish_all(
-                                            self.handle_detection(site_info)
+                                            self.handle_detection(site_info, hotword_audio)
                                         ),
                                         self.loop,
                                     )
